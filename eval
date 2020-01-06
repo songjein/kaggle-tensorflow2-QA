@@ -1,4 +1,4 @@
-python -m language.question_answering.bert_joint.run_nq \
+python -m run_nq_tf_2 \
   --logtostderr \
   --bert_config_file=../bert-joint-baseline/bert_config.json \
   --vocab_file=bert-../joint-baseline/vocab-nq.txt \
@@ -8,7 +8,7 @@ python -m language.question_answering.bert_joint.run_nq \
   --output_dir=bert_model_output \
   --output_prediction_file=bert_model_output/predictions.json
 
-python -m natural_questions.nq_eval \
+python -m nq_eval \
   --logtostderr \
   --gold_path=../tiny-dev/nq-dev-sample.jsonl.gz \
   --predictions_path=bert_model_output/predictions.json
