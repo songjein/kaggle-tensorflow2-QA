@@ -1,0 +1,14 @@
+python -m language.question_answering.bert_joint.run_nq \
+  --logtostderr \
+  --bert_config_file=../bert-joint-baseline/bert_config.json \
+  --vocab_file=bert-../joint-baseline/vocab-nq.txt \
+  --predict_file=../tiny-dev/nq-dev-sample.no-annot.jsonl.gz \
+  --init_checkpoint=../bert-joint-baseline/bert_joint.ckpt \
+  --do_predict \
+  --output_dir=bert_model_output \
+  --output_prediction_file=bert_model_output/predictions.json
+
+python -m natural_questions.nq_eval \
+  --logtostderr \
+  --gold_path=../tiny-dev/nq-dev-sample.jsonl.gz \
+  --predictions_path=bert_model_output/predictions.json
