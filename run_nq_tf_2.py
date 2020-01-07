@@ -955,12 +955,16 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
 
 def make_model():
-  """make model using keras API."""
-  # [NOTICE] ref. https://www.kaggle.com/prokaj/bert-joint-baseline-notebook
+  """make model using keras API.
+
+    NOTICE:
+    - ref. https://www.kaggle.com/prokaj/bert-joint-baseline-notebook
+  """
   with open('../bert-joint-baseline/bert_config.json') as f:
     config = json.load(f)
   seq_len = config['max_position_embeddings']
-  unique_id = tf.keras.Input(shape=(1,), dtype=tf.int64, name='unique_id')
+
+  unique_ids = tf.keras.Input(shape=(1,), dtype=tf.int64, name='unique_ids') # 단수가 좀 더 어울리긴 함
   input_ids = tf.keras.Input(shape=(seq_len,), dtype=tf.int32, name='input_ids')
   input_mask = tf.keras.Input(shape=(seq_len,), dtype=tf.int32, name='input_mask')
   segment_ids = tf.keras.Input(shape=(seq_len,), dtype=tf.int32, name='segment_ids')
@@ -978,12 +982,49 @@ def make_model():
   start_logits = tf.squeeze(start_logits, axis=-1, name='start_squeeze')
   end_logits = tf.squeeze(end_logits, axis=-1, name='end_squeeze')
 
-  logits_for_ans_type = tf.keras.layers.Dense(256, name='dense_1_ans_type')(pooled_output)
-  logits_for_ans_type = tf.keras.layers.Dense(128, name='dense_2_ans_type')(logits_for_ans_type)
-  ans_type = tf.keras.layers.Dense(5, name='ans_type')(logits_for_ans_type)
+  logits = tf.keras.layers.Dense(256, name='dense_1_ans_type')(pooled_output)
+  logits = tf.keras.layers.Dense(128, name='dense_2_ans_type')(logits)
+  answer_type_logits = tf.keras.layers.Dense(5, name='ans_type')(logits)
 
-  return tf.keras.Model([input_ for input_ in [unique_id, input_ids, input_mask, segment_ids] if input_ is not None],
-						[unique_id, start_logits, end_logits, ans_type], name='bert-baseline')
+  # Computes the loss for positions.
+  def compute_loss(logits, positions):
+    one_hot_positions = tf.one_hot(
+        positions, depth=seq_len, dtype=tf.float32)
+    log_probs = tf.nn.log_softmax(logits, axis=-1)
+    # loss = -tf.reduce_sum(input_tensor=one_hot_positions * log_probs, axis=-1)
+    loss = -tf.reduce_mean(
+        input_tensor=tf.reduce_sum(input_tensor=one_hot_positions * log_probs, axis=-1))
+    return loss
+
+  # Computes the loss for labels.
+  def compute_label_loss(logits, labels):
+    one_hot_labels = tf.one_hot(
+        labels, depth=len(AnswerType), dtype=tf.float32)
+    log_probs = tf.nn.log_softmax(logits, axis=-1)
+    # loss = -tf.reduce_sum(input_tensor=one_hot_labels * log_probs, axis=-1)
+    loss = -tf.reduce_mean(
+        input_tensor=tf.reduce_sum(input_tensor=one_hot_labels * log_probs, axis=-1))
+    return loss
+  """ 얘네 들이 배치를 생각하고 짜진건데... """
+
+  start_positions = tf.keras.Input(shape=(1,), dtype=tf.int32, name='start_positions')
+  end_positions = tf.keras.Input(shape=(1,), dtype=tf.int32, name='end_positions')
+  answer_types = tf.keras.Input(shape=(1,), dtype=tf.int32, name='answer_types')
+
+  start_loss = compute_loss(start_logits, start_positions)
+  end_loss = compute_loss(end_logits, end_positions)
+  answer_type_loss = compute_label_loss(answer_type_logits, answer_types)
+  total_loss = (start_loss + end_loss + answer_type_loss) / 3.0
+
+  model = tf.keras.Model([input_ for input_ in [unique_ids, input_ids, input_mask, segment_ids, 
+                                                start_positions, end_positions, answer_types] if input_ is not None],
+						[unique_ids, start_logits, end_logits, answer_type_logits], name='bert-baseline')
+
+  model.add_loss(total_loss)
+
+  model.compile(optimizer='adam')
+
+  return model
 
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
@@ -1012,7 +1053,6 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         input_mask=input_mask,
         segment_ids=segment_ids,
         use_one_hot_embeddings=use_one_hot_embeddings)
-
 
     initialized_variable_names = {}
     scaffold_fn = None
@@ -1084,7 +1124,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
   return model_fn
 
 
-def input_fn_builder(input_file, seq_length, is_training, drop_remainder):
+def input_fn_builder(input_file, seq_length, is_training, drop_remainder, batch_size=32):
   """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
   name_to_features = {
@@ -1115,7 +1155,7 @@ def input_fn_builder(input_file, seq_length, is_training, drop_remainder):
 
   def input_fn(params):
     """The actual input function."""
-    batch_size = params["batch_size"]
+    # batch_size = params["batch_size"]
 
     # For training, we want a lot of parallel reading and shuffling.
     # For eval, we want no shuffling and parallel reading doesn't matter.
@@ -1391,6 +1431,46 @@ def validate_flags_or_throw(bert_config):
         "(%d) + 3" % (FLAGS.max_seq_length, FLAGS.max_query_length))
 
 
+def new_main(argv):
+  tf.io.gfile.makedirs(FLAGS.output_dir)
+
+  model = make_model()
+  model.summary()
+
+  run_config = tf.estimator.RunConfig(
+    model_dir=FLAGS.output_dir,
+     save_checkpoints_steps=FLAGS.save_checkpoints_steps)
+
+  estimator = tf.keras.estimator.model_to_estimator(
+    keras_model=model, config=run_config)
+  
+  if FLAGS.do_train:
+    num_train_features = FLAGS.train_num_precomputed
+    num_train_steps = int(num_train_features / FLAGS.train_batch_size *
+                          FLAGS.num_train_epochs)
+
+  if FLAGS.do_train:
+    print("***** Running training on precomputed features *****")
+    print("  Num split examples = %d", num_train_features)
+    print("  Batch size = %d", FLAGS.train_batch_size)
+    print("  Num steps = %d", num_train_steps)
+    train_filenames = tf.io.gfile.glob(FLAGS.train_precomputed_file)
+    train_input_fn = input_fn_builder(
+        input_file=train_filenames,
+        seq_length=FLAGS.max_seq_length,
+        is_training=True,
+        drop_remainder=True)
+
+    # 데이터 확인해 보기 key: numpy 의 딕셔너리로 구성되어 있네
+    #for d in train_input_fn({'batch_size': 32}).take(1):
+    #  print(d)
+    #  print(d.keys())
+
+    # estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+    estimator.train(input_fn=train_input_fn, max_steps=1)
+    return
+
+
 def main(argv):
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
@@ -1427,12 +1507,6 @@ def main(argv):
       model_fn=model_fn,
       config=run_config,
       params={'batch_size':FLAGS.train_batch_size})
-
-  '''
-  model = make_model()
-  model.compile(optimizer='adam', loss='', metrics=['accuracy'])
-  estimator = tf.keras.estimator.model_to_estimator(keras_model=model)
-  '''
 
   if FLAGS.do_train:
     print("***** Running training on precomputed features *****")
@@ -1540,5 +1614,7 @@ if __name__ == "__main__":
   flags.mark_flag_as_required("output_dir")
 
   # app.run(main)
-  model = make_model()
-  model.summary()
+  # model = make_model()
+  # model.summary()
+
+  app.run(new_main)
